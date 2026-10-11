@@ -38,15 +38,61 @@ object ModInfo {
     }
 }
 
+object ModKinds {
+    const val GUMM = "gumm"
+    const val PACK = "pack"
+    const val LOADER = "modloader"
+    private val packExt = setOf("pck", "zip")
+
+    fun label(kind: String): String = when (kind) {
+        PACK -> "Resource pack"
+        LOADER -> "Godot Mod Loader"
+        else -> "GUMM"
+    }
+
+    fun packFiles(dir: File): List<File> =
+        dir.walkTopDown().maxDepth(2).filter { it.isFile && it.extension.lowercase() in packExt }.sortedBy { it.path }.toList()
+
+    fun detect(dir: File): String = when {
+        File(dir, "mod.gd").isFile || File(dir, "GUMM_mod.gd").isFile -> GUMM
+        File(dir, "mods-unpacked").isDirectory -> LOADER
+        packFiles(dir).isNotEmpty() -> PACK
+        else -> GUMM
+    }
+}
+
 data class Conflict(val path: String, val mods: List<String>)
 
 object ModConflicts {
     private val pattern = Regex("""(?:replace_resource_at|take_over_path)\s*\(\s*"(res://[^"]+)"""")
 
+    private fun packPaths(dir: File): Set<String> {
+        val out = HashSet<String>()
+        for (f in ModKinds.packFiles(dir)) {
+            if (!f.extension.equals("zip", true)) continue
+            try {
+                java.util.zip.ZipFile(f).use { z ->
+                    for (e in z.entries()) {
+                        if (out.size > 50000) break
+                        if (!e.isDirectory && !e.name.startsWith(".import")) out.add("res://" + e.name)
+                    }
+                }
+            } catch (e: Exception) {
+            }
+        }
+        return out
+    }
+
     fun scan(store: Store, game: Game): List<Conflict> {
         val owners = LinkedHashMap<String, MutableList<String>>()
         for (m in game.mods.filter { it.enabled }) {
-            val script = File(File(store.modsDir(game.id), m.folder), "mod.gd")
+            val modDir = File(store.modsDir(game.id), m.folder)
+            if (m.kind == ModKinds.PACK) {
+                for (hit in packPaths(modDir)) owners.getOrPut(hit) { ArrayList() }.add(m.name)
+                continue
+            }
+            if (m.kind != ModKinds.GUMM) continue
+            val script = File(modDir, "mod.gd")
             if (!script.isFile) continue
             val text = try { script.readText() } catch (e: Exception) { continue }
             for (hit in pattern.findAll(text).map { it.groupValues[1] }.toSet()) {
@@ -68,13 +114,23 @@ object ModStatus {
             val dir = File(store.modsDir(game.id), m.folder)
             out[m.id] = when {
                 !m.enabled -> ModState.OFF
-                !File(dir, "mod.gd").isFile && !File(dir, "GUMM_mod.gd").isFile -> ModState.ERROR
+                problem(dir, m, game) != null -> ModState.ERROR
                 problems.any { it.contains(m.folder, true) } -> ModState.ERROR
                 m.name in conflicted -> ModState.CONFLICT
                 else -> ModState.ACTIVE
             }
         }
         return out
+    }
+
+    fun problem(dir: File, m: Mod, game: Game): String? = when (m.kind) {
+        ModKinds.PACK -> if (ModKinds.packFiles(dir).isEmpty()) "No .pck or .zip file found" else null
+        ModKinds.LOADER -> when {
+            !LoaderGen.supports(game) -> "Needs a Godot 3 or 4 game"
+            !File(dir, "mods-unpacked").isDirectory -> "mods-unpacked folder is missing"
+            else -> null
+        }
+        else -> if (!File(dir, "mod.gd").isFile && !File(dir, "GUMM_mod.gd").isFile) "mod.gd is missing" else null
     }
 
     private fun loaderProblems(game: Game): List<String> {

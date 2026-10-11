@@ -13,8 +13,8 @@ android {
         applicationId = "com.gumm.mobile"
         minSdk = 28
         targetSdk = 34
-        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 3
-        versionName = (project.findProperty("appVersion") as String?) ?: "1.3"
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 5
+        versionName = (project.findProperty("appVersion") as String?) ?: "1.5"
     }
 
     buildTypes {

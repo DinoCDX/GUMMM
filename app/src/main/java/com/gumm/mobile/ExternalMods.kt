@@ -64,14 +64,15 @@ object ExternalMods {
         val root = root(game.targetPackage())
         root.mkdirs()
         if (!root.isDirectory) throw IllegalStateException("Cannot create ${root.path}")
-        val wanted = game.mods.map { it.folder }.toSet()
+        val synced = game.mods.filter { it.kind != ModKinds.LOADER }
+        val wanted = synced.map { it.folder }.toSet()
         root.listFiles()
             ?.filter { it.isDirectory && File(it, MARKER).isFile && it.name !in wanted }
             ?.forEach {
                 it.deleteRecursively()
                 log("Removed ${it.name}")
             }
-        for (mod in game.mods) {
+        for (mod in synced) {
             val src = File(store.modsDir(game.id), mod.folder)
             val dst = File(root, mod.folder)
             if (!src.isDirectory) continue
@@ -92,7 +93,9 @@ object ExternalMods {
 
     private fun writeConfig(game: Game) {
         val cfg = configFile(game.targetPackage())
-        val body = game.mods.joinToString("\n") { it.folder + "=" + (if (it.enabled) "1" else "0") }
+        val lines = game.mods.map { it.folder + "=" + (if (it.enabled) "1" else "0") } +
+            game.mods.filter { it.kindManual }.map { "kind:" + it.folder + "=" + it.kind }
+        val body = lines.joinToString("\n")
         val old = if (cfg.isFile) cfg.readLines().filter { !it.startsWith("rev=") }.joinToString("\n").trim() else null
         if (old == body) return
         cfg.writeText("rev=" + System.currentTimeMillis() + "\n" + body + "\n")

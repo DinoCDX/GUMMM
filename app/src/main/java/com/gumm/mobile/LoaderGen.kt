@@ -1,7 +1,7 @@
 package com.gumm.mobile
 
 object LoaderGen {
-    const val VERSION = 7
+    const val VERSION = 8
 
     fun major(game: Game): Int = game.godotVersion.split('.').firstOrNull()?.toIntOrNull() ?: 0
 
@@ -16,6 +16,9 @@ object LoaderGen {
     private fun gdDict(items: Map<String, Boolean>): String =
         items.entries.joinToString(", ", "{", "}") { gd(it.key) + ": " + it.value }
 
+    private fun gdMap(items: Map<String, String>): String =
+        items.entries.joinToString(", ", "{", "}") { gd(it.key) + ": " + gd(it.value) }
+
     private fun tscnString(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\t", "\\t")
 
@@ -28,6 +31,7 @@ object LoaderGen {
         logPath: String,
         rev: String,
         defaults: Map<String, Boolean>,
+        kinds: Map<String, String>,
         button: Boolean
     ): String {
         val four = major(game) == 4
@@ -39,6 +43,7 @@ object LoaderGen {
             .replace("__LOG_PATH__", gd(logPath))
             .replace("__REV__", gd(rev))
             .replace("__DEFAULTS__", gdDict(defaults))
+            .replace("__KINDS__", gdMap(kinds))
             .replace("__BUTTON__", button.toString())
         val body = tscnString(source)
         return if (four) {

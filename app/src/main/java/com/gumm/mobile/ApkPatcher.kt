@@ -34,7 +34,7 @@ class ApkPatcher(private val ctx: Context, private val store: Store, private val
     }
 
     private val textExtensions = setOf("tscn", "gd", "cfg", "tres", "txt", "json")
-    private val storedExtensions = setOf("png", "jpg", "jpeg", "webp", "ogg", "mp3", "mp4", "webm", "ogv", "zip", "ctex")
+    private val storedExtensions = setOf("png", "jpg", "jpeg", "webp", "ogg", "mp3", "mp4", "webm", "ogv", "zip", "pck", "ctex")
 
     fun patch(game: Game, log: (String) -> Unit): File {
         val original = store.originalApk(game.id)
@@ -49,7 +49,8 @@ class ApkPatcher(private val ctx: Context, private val store: Store, private val
             game.modsExternal -> emptyList<Mod>()
             game.customLoader -> game.mods.filter { it.enabled }
             else -> game.mods
-        }
+        }.filter { it.kind != ModKinds.LOADER }
+        val loaderMods = if (game.customLoader) emptyList() else game.mods.filter { it.enabled && it.kind == ModKinds.LOADER }
 
         if (game.customLoader) {
             require(File(kit, "override.cfg").isFile) { "Import your loader files first (override.cfg is missing)" }
@@ -73,12 +74,14 @@ class ApkPatcher(private val ctx: Context, private val store: Store, private val
             val logPath = if (game.modsExternal) ExternalMods.logFile(newPkg).path else ""
             val defaults = LinkedHashMap<String, Boolean>()
             for (m in game.mods) defaults[m.folder] = m.enabled
+            val kinds = LinkedHashMap<String, String>()
+            for (m in game.mods) if (m.kindManual) kinds[m.folder] = m.kind
             val major = LoaderGen.major(game)
             val template = ctx.assets.open("gumm_loader$major.gd").use { String(it.readBytes(), Charsets.UTF_8) }
             val core = ctx.assets.open("gumm_core$major.gd").use { it.readBytes() }
             val scene = LoaderGen.scene(
                 game, template, list, root, configPath, logPath,
-                System.currentTimeMillis().toString(), defaults, game.overlay
+                System.currentTimeMillis().toString(), defaults, kinds, game.overlay
             )
             added["assets/GUMM_mod_loader.tscn"] = Added(scene.toByteArray(Charsets.UTF_8), null)
             added["assets/GUMM_core.gd"] = Added(core, null)
@@ -100,6 +103,10 @@ class ApkPatcher(private val ctx: Context, private val store: Store, private val
                 n++
             }
             log("Mod ${mod.name}: $n files")
+        }
+
+        if (loaderMods.isNotEmpty()) {
+            kitOverride = (kitOverride ?: "") + addModLoader(game, loaderMods, original, added, log)
         }
 
         val label = if (game.labelSuffix) "${game.title} (Modded)" else null
@@ -146,12 +153,113 @@ class ApkPatcher(private val ctx: Context, private val store: Store, private val
             fresh.delete()
         }
         log("Built ${out.length() / 1024} KB")
+        val splitOut = File(buildDir, "splits")
+        splitOut.deleteRecursively()
+        val splits = store.splitFiles(game.id)
+        if (splits.isNotEmpty()) {
+            splitOut.mkdirs()
+            var splitPatch: ((ByteArray) -> ByteArray)? = null
+            if (oldPkg != newPkg) splitPatch = { bytes -> AxmlPatcher.patch(bytes, oldPkg, newPkg, null) }
+            for (s in splits) {
+                val tmp = File(buildDir, "split_stage.apk")
+                tmp.delete()
+                rewrite(s, tmp, emptyMap(), null, splitPatch)
+                ApkSigner.Builder(listOf(cfg))
+                    .setInputApk(tmp)
+                    .setOutputApk(File(splitOut, s.name))
+                    .setMinSdkVersion(28)
+                    .setV1SigningEnabled(false)
+                    .setV2SigningEnabled(true)
+                    .setV3SigningEnabled(true)
+                    .build()
+                    .sign()
+                tmp.delete()
+                log("Split ${s.name} signed")
+            }
+        }
         if (perms.isNotEmpty()) {
             val info = ctx.packageManager.getPackageArchiveInfo(out.path, android.content.pm.PackageManager.GET_PERMISSIONS)
             val ok = info?.requestedPermissions?.contains("android.permission.MANAGE_EXTERNAL_STORAGE") == true
             log(if (ok) "Checked: built APK requests All files access" else "! Built APK does not request All files access")
         }
         return out
+    }
+
+    private fun listAssets(path: String): List<String> {
+        val names = ctx.assets.list(path) ?: return emptyList()
+        if (names.isEmpty()) return listOf(path)
+        return names.flatMap { listAssets("$path/$it") }
+    }
+
+    private fun mergeClassCache(orig: String?, ours: String): String {
+        val head = "list=Array[Dictionary](["
+        val ourStart = ours.indexOf(head)
+        val ourEnd = ours.lastIndexOf("])")
+        if (ourStart < 0 || ourEnd < 0) return orig ?: ours
+        val ourBody = ours.substring(ourStart + head.length, ourEnd).trim()
+        if (orig == null) return ours
+        val start = orig.indexOf(head)
+        val end = orig.lastIndexOf("])")
+        if (start < 0 || end < start + head.length) return ours
+        val origBody = orig.substring(start + head.length, end).trim()
+        val joined = if (origBody.isEmpty()) ourBody else "$origBody, $ourBody"
+        return orig.substring(0, start + head.length) + joined + orig.substring(end)
+    }
+
+    private fun addModLoader(
+        game: Game,
+        mods: List<Mod>,
+        original: File,
+        added: MutableMap<String, Added>,
+        log: (String) -> Unit
+    ): String {
+        val names = ZipFile(original).use { z -> z.entries().asSequence().map { it.name }.toList() }
+        val loaderPath = "addons/mod_loader/mod_loader.gd"
+        val hasOwn = names.any { it.endsWith(loaderPath) } || GodotInspector.hasFile(original, loaderPath) ||
+            store.splitFiles(game.id).any { GodotInspector.hasFile(it, loaderPath) }
+        val major = LoaderGen.major(game)
+        if (!hasOwn && major != 4) {
+            log("! This Godot $major game does not include the Godot Mod Loader. Its mods were skipped.")
+            return ""
+        }
+        for (mod in mods) {
+            val dir = File(store.modsDir(game.id), mod.folder)
+            var n = 0
+            for (f in dir.walkTopDown().filter { it.isFile }) {
+                val rel = f.relativeTo(dir).path.replace(File.separatorChar, '/')
+                added["assets/$rel"] = Added(null, f)
+                n++
+            }
+            log("Godot Mod Loader mod ${mod.name}: $n files")
+        }
+        if (hasOwn) {
+            log("The game already includes the Godot Mod Loader")
+            return ""
+        }
+        var count = 0
+        for (path in listAssets("modloader4")) {
+            val rel = path.removePrefix("modloader4/")
+            if (rel == "classes.cfg") continue
+            val bytes = ctx.assets.open(path).use { it.readBytes() }
+            added["assets/$rel"] = Added(bytes, null)
+            count++
+        }
+        val profile = "[gd_resource type=\"Resource\" load_steps=2 format=3]\n\n" +
+            "[ext_resource type=\"Script\" path=\"res://addons/mod_loader/resources/options_profile.gd\" id=\"1\"]\n\n" +
+            "[resource]\nscript = ExtResource(\"1\")\nenable_mods = true\nallow_modloader_autoloads_anywhere = true\n" +
+            "log_level = 3\nload_from_local = false\nload_from_unpacked = true\ndisable_restart = true\n"
+        added["assets/addons/mod_loader/options/profiles/default.tres"] = Added(profile.toByteArray(Charsets.UTF_8), null)
+        val cachePath = names.firstOrNull { it.endsWith(".godot/global_script_class_cache.cfg") } ?: "assets/.godot/global_script_class_cache.cfg"
+        val orig = if (names.contains(cachePath)) {
+            ZipFile(original).use { z -> z.getInputStream(z.getEntry(cachePath)).use { String(it.readBytes(), Charsets.UTF_8) } }
+        } else {
+            null
+        }
+        val ours = ctx.assets.open("modloader4/classes.cfg").use { String(it.readBytes(), Charsets.UTF_8) }
+        added[cachePath] = Added(mergeClassCache(orig, ours).toByteArray(Charsets.UTF_8), null)
+        log("Added the Godot Mod Loader ($count files)")
+        return "\n[autoload]\n\nModLoaderStore=\"*res://addons/mod_loader/mod_loader_store.gd\"\n" +
+            "ModLoader=\"*res://addons/mod_loader/mod_loader.gd\"\n"
     }
 
     private fun transform(game: Game, rel: String, bytes: ByteArray, modsRef: String): ByteArray {

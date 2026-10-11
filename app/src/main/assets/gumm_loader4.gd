@@ -7,6 +7,7 @@ const CONFIG_PATH = __CONFIG_PATH__
 const LOG_PATH = __LOG_PATH__
 const REV = __REV__
 const DEFAULTS = __DEFAULTS__
+const KINDS = __KINDS__
 const BUTTON = __BUTTON__
 
 
@@ -22,6 +23,7 @@ func _ready():
 			"log": LOG_PATH,
 			"rev": REV,
 			"defaults": DEFAULTS,
+			"kinds": KINDS,
 			"button": BUTTON
 		})
 		core.load_all(get_tree())

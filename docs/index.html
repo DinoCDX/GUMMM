@@ -82,6 +82,17 @@ a{color:var(--accent)}
 <li>Import mods in the Mods tab, then build and install.</li>
 </ul>
 
+<h2>Files tab</h2>
+<p>Browse the game's files before you mod them. Switch between the original APK, your modded build and the contents of the game's <code>.pck</code>. Search by name or inside text files, view text and images, export files to your phone, and edit or replace a file. Edits go into a resource pack called My edits that wins over other mods.</p>
+
+<h2>Mod types</h2>
+<ul>
+<li><b>GUMM:</b> a folder with <code>mod.cfg</code> and <code>mod.gd</code>.</li>
+<li><b>Resource pack:</b> a <code>.pck</code> or <code>.zip</code> with no scripts. Later packs replace earlier files.</li>
+<li><b>Godot Mod Loader:</b> Experimental. Godot 4 games get the bundled framework. Godot 3 games, like Brotato, must already include it. GUMMM packs the mods into the APK.</li>
+</ul>
+<p class="muted">GUMMM detects the type when you import. Tap the type under a mod to change it.</p>
+
 <h2>Making a mod</h2>
 <p>A mod is a folder or zip with a <code>mod.cfg</code> and a <code>mod.gd</code>. A zip with several mods imports them all.</p>
 <h3>mod.cfg</h3>
@@ -118,7 +129,7 @@ func initialize(mod_path, scene_tree):
 <li>Android 9 or newer.</li>
 <li>Mods load from an external folder by default on Android 11 or newer, which needs All files access. Packed mode is available in settings.</li>
 <li>Copying save data needs root.</li>
-<li>Split APK games are not supported yet.</li>
+<li>Split APK games are supported, including <code>.apks</code>, <code>.xapk</code> and <code>.apkm</code> bundles.</li>
 </ul>
 
 <footer>Made by <a href="https://github.com/DinoCDX">DinoCDX</a></footer>

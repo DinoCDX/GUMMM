@@ -13,22 +13,73 @@ object GodotInspector {
         Regex("""(\d)\.(\d{1,2})(?:\.(\d{1,2}))?\.(?:stable|beta\d*|rc\d*|dev\d*|alpha\d*)\.[a-z_]+""")
 
     fun looksLikeGodot(apk: File): Boolean = try {
-        ZipFile(apk).use { z -> z.entries().asSequence().any { it.name.endsWith("libgodot_android.so") } }
+        ZipFile(apk).use { z -> z.entries().asSequence().any { isGodotLib(it.name) } }
     } catch (e: Exception) {
         false
+    }
+
+    private fun isGodotLib(name: String): Boolean {
+        if (!name.startsWith("lib/")) return false
+        val n = name.substringAfterLast('/').lowercase()
+        return n.contains("godot") && n.endsWith(".so")
+    }
+
+    fun describe(apk: File): String = try {
+        ZipFile(apk).use { z ->
+            val names = z.entries().asSequence().map { it.name }.toList()
+            val libs = names.filter { it.startsWith("lib/") && it.endsWith(".so") }
+            val data = names.filter { it.endsWith(".pck") || it.endsWith("project.binary") || it.endsWith("project.godot") }
+            apk.name + ": " + names.size + " files, libs " +
+                (if (libs.isEmpty()) "none" else libs.take(6).joinToString(", ")) +
+                ", data " + (if (data.isEmpty()) "none" else data.take(4).joinToString(", "))
+        }
+    } catch (e: Exception) {
+        apk.name + ": unreadable"
+    }
+
+    fun detectMainSceneAll(apk: File, splits: List<File>): String? {
+        detectMainScene(apk)?.let { return it }
+        for (s in splits) detectMainScene(s)?.let { return it }
+        return null
+    }
+
+    fun looksLikeGodotAny(apk: File, splits: List<File>): Boolean =
+        looksLikeGodot(apk) || splits.any { looksLikeGodot(it) }
+
+    fun inspectAll(apk: File, splits: List<File>): Info {
+        val first = inspect(apk)
+        if (first.isGodot) return first
+        for (s in splits) {
+            val i = inspect(s)
+            if (i.isGodot) return i
+        }
+        return first
     }
 
     fun inspect(apk: File): Info {
         return try {
             ZipFile(apk).use { z ->
                 val libs = z.entries().asSequence()
-                    .filter { it.name.startsWith("lib/") && it.name.endsWith("libgodot_android.so") }
+                    .filter { isGodotLib(it.name) }
+                    .sortedByDescending { it.name.endsWith("libgodot_android.so") }
                     .toList()
-                if (libs.isEmpty()) {
-                    Info(false, "")
-                } else {
+                if (libs.isNotEmpty()) {
                     val pick = libs.firstOrNull { it.name.contains("arm64") } ?: libs.first()
                     Info(true, scanVersion(z, pick))
+                } else {
+                    var found: Info? = null
+                    val others = z.entries().asSequence()
+                        .filter { it.name.startsWith("lib/") && it.name.endsWith(".so") }
+                        .sortedByDescending { it.name.contains("arm64") }
+                        .toList()
+                    for (e in others) {
+                        val v = scanVersion(z, e)
+                        if (v.isNotEmpty()) {
+                            found = Info(true, v)
+                            break
+                        }
+                    }
+                    found ?: Info(false, "")
                 }
             }
         } catch (e: Exception) {
@@ -53,6 +104,88 @@ object GodotInspector {
             }
         }
         return ""
+    }
+
+    class PckFile(val path: String, val offset: Long, val size: Long, val encrypted: Boolean)
+
+    fun listPck(z: ZipFile, e: ZipEntry): List<PckFile> {
+        val head = readAt(z, e, 0, 48)
+        if (le32(head, 0) != 0x43504447) return emptyList()
+        val ver = le32(head, 4)
+        var flags = 0
+        var dirStart = 84L
+        var base = 0L
+        if (ver >= 3) {
+            flags = le32(head, 20)
+            base = le64(head, 24)
+            dirStart = le64(head, 32)
+        } else if (ver == 2) {
+            flags = le32(head, 20)
+            base = le64(head, 24)
+            dirStart = 96L
+        }
+        if ((flags and 1) != 0) return emptyList()
+        val out = ArrayList<PckFile>()
+        z.getInputStream(e).use { s ->
+            skipFully(s, dirStart)
+            val count = le32(readN(s, 4), 0)
+            if (count < 0 || count > 2000000) return emptyList()
+            for (i in 0 until count) {
+                val pl = le32(readN(s, 4), 0)
+                if (pl < 0 || pl > 4096) break
+                val path = String(readN(s, pl), Charsets.UTF_8).trimEnd('\u0000')
+                val off = le64(readN(s, 8), 0)
+                val size = le64(readN(s, 8), 0)
+                skipFully(s, 16)
+                val fileFlags = if (ver >= 2) le32(readN(s, 4), 0) else 0
+                out.add(PckFile(path.removePrefix("res://"), off, size, (fileFlags and 1) != 0))
+            }
+        }
+        val smallest = out.minOfOrNull { it.offset } ?: 0L
+        return if (base > 0 && smallest < base) out.map { PckFile(it.path, it.offset + base, it.size, it.encrypted) } else out
+    }
+
+    fun hasFile(apk: File, suffix: String): Boolean = try {
+        ZipFile(apk).use { z ->
+            val entries = z.entries().asSequence().toList()
+            if (entries.any { it.name.endsWith(suffix) }) {
+                true
+            } else {
+                entries.filter { it.name.endsWith(".pck") }.any { pckHas(z, it, suffix) }
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun pckHas(z: ZipFile, e: ZipEntry, suffix: String): Boolean {
+        val head = readAt(z, e, 0, 48)
+        if (le32(head, 0) != 0x43504447) return false
+        val ver = le32(head, 4)
+        var flags = 0
+        var dirStart = 84L
+        if (ver >= 3) {
+            flags = le32(head, 20)
+            dirStart = le64(head, 32)
+        } else if (ver == 2) {
+            flags = le32(head, 20)
+            dirStart = 96L
+        }
+        if ((flags and 1) != 0) return false
+        z.getInputStream(e).use { s ->
+            skipFully(s, dirStart)
+            val count = le32(readN(s, 4), 0)
+            if (count < 0 || count > 5_000_000) return false
+            for (i in 0 until count) {
+                val pl = le32(readN(s, 4), 0)
+                if (pl < 0 || pl > 4096) return false
+                val path = String(readN(s, pl), Charsets.UTF_8).trimEnd('\u0000')
+                skipFully(s, 32)
+                if (ver >= 2) skipFully(s, 4)
+                if (path.endsWith(suffix)) return true
+            }
+        }
+        return false
     }
 
     fun detectMainScene(apk: File): String? {

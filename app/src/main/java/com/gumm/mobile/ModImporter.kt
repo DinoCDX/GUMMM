@@ -2,36 +2,27 @@ package com.gumm.mobile
 
 import android.content.Context
 import android.net.Uri
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.zip.ZipInputStream
 
 object ModImporter {
+    private val packExt = setOf("pck", "zip")
+
     fun fromZip(ctx: Context, uri: Uri, modsRoot: File, log: (String) -> Unit): List<Mod> {
-        val staging = File(ctx.cacheDir, "stage_" + System.nanoTime()).apply { mkdirs() }
+        val work = File(ctx.cacheDir, "stage_" + System.nanoTime()).apply { mkdirs() }
         try {
-            val base = staging.canonicalPath + File.separator
+            val raw = File(work, "raw.bin")
             val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("Cannot open file")
-            input.use { raw ->
-                ZipInputStream(raw.buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        val out = File(staging, entry.name)
-                        if (!out.canonicalPath.startsWith(base)) throw IOException("Unsafe path in zip")
-                        if (entry.isDirectory) {
-                            out.mkdirs()
-                        } else {
-                            out.parentFile?.mkdirs()
-                            out.outputStream().use { zis.copyTo(it, 1 shl 16) }
-                        }
-                        entry = zis.nextEntry
-                    }
-                }
-            }
-            val hint = DocFiles.fileName(ctx.contentResolver, uri).substringBeforeLast('.')
-            return finish(staging, hint, modsRoot, log)
+            input.use { i -> raw.outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+            val fileName = DocFiles.fileName(ctx.contentResolver, uri)
+            val staging = File(work, "x").apply { mkdirs() }
+            if (!isPck(raw)) extract(raw, staging)
+            val hint = fileName.substringBeforeLast('.')
+            return finish(staging, hint, modsRoot, log, raw)
         } finally {
-            staging.deleteRecursively()
+            work.deleteRecursively()
         }
     }
 
@@ -40,45 +31,137 @@ object ModImporter {
         try {
             DocFiles.copyTree(ctx.contentResolver, tree, staging)
             val hint = DocFiles.treeName(ctx.contentResolver, tree)
-            return finish(staging, hint, modsRoot, log)
+            return finish(staging, hint, modsRoot, log, null)
         } finally {
             staging.deleteRecursively()
         }
     }
 
-    private fun finish(staging: File, hint: String, modsRoot: File, log: (String) -> Unit): List<Mod> {
-        val roots = findModRoots(staging)
-        if (roots.isEmpty()) throw IOException("No mod.cfg found. A mod needs mod.cfg and mod.gd.")
-        val out = ArrayList<Mod>()
-        for (modRoot in roots) {
-            val cfg = parseCfg(File(modRoot, "mod.cfg"))
-            val fallback = if (modRoot == staging) hint else modRoot.name
-            val name = cfg["name"] ?: cfg["title"] ?: fallback
-            val folder = uniqueFolder(modsRoot, sanitize(name.ifBlank { fallback }))
-            modRoot.copyRecursively(File(modsRoot, folder), overwrite = true)
-            log("Mod folder: $folder")
-            out.add(
-                Mod(
-                    id = folder,
-                    name = name,
-                    version = cfg["version"] ?: "",
-                    author = cfg["author"] ?: cfg["authors"] ?: "",
-                    description = cfg["description"] ?: "",
-                    folder = folder,
-                    enabled = true
-                )
-            )
+    private fun isPck(f: File): Boolean = try {
+        f.inputStream().use { s ->
+            val b = ByteArray(4)
+            s.read(b) == 4 && String(b, Charsets.ISO_8859_1) == "GDPC"
         }
-        return out
+    } catch (e: Exception) {
+        false
     }
 
-    private fun findModRoots(dir: File): List<File> {
+    private fun extract(zip: File, staging: File) {
+        val base = staging.canonicalPath + File.separator
+        zip.inputStream().buffered().use { raw ->
+            ZipInputStream(raw).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val out = File(staging, entry.name)
+                    if (!out.canonicalPath.startsWith(base)) throw IOException("Unsafe path in zip")
+                    if (entry.isDirectory) {
+                        out.mkdirs()
+                    } else {
+                        out.parentFile?.mkdirs()
+                        out.outputStream().use { zis.copyTo(it, 1 shl 16) }
+                    }
+                    entry = zis.nextEntry
+                }
+            }
+        }
+    }
+
+    private fun finish(staging: File, hint: String, modsRoot: File, log: (String) -> Unit, raw: File?): List<Mod> {
+        val gummRoots = findRoots(staging) { File(it, "mod.cfg").isFile }
+        if (gummRoots.isNotEmpty()) return gummRoots.map { importGumm(it, staging, hint, modsRoot, log) }
+        val loaderRoots = findRoots(staging) { File(it, "mods-unpacked").isDirectory }
+        if (loaderRoots.isNotEmpty()) return loaderRoots.map { importLoader(it, staging, hint, modsRoot, log) }
+        return listOf(importPack(staging, hint, modsRoot, log, raw))
+    }
+
+    private fun importGumm(modRoot: File, staging: File, hint: String, modsRoot: File, log: (String) -> Unit): Mod {
+        val cfg = parseCfg(File(modRoot, "mod.cfg"))
+        val fallback = if (modRoot == staging) hint else modRoot.name
+        val name = cfg["name"] ?: cfg["title"] ?: fallback
+        val folder = uniqueFolder(modsRoot, sanitize(name.ifBlank { fallback }))
+        modRoot.copyRecursively(File(modsRoot, folder), overwrite = true)
+        log("Mod folder: $folder")
+        return Mod(
+            id = folder,
+            name = name,
+            version = cfg["version"] ?: "",
+            author = cfg["author"] ?: cfg["authors"] ?: "",
+            description = cfg["description"] ?: "",
+            folder = folder,
+            enabled = true,
+            kind = ModKinds.GUMM
+        )
+    }
+
+    private fun importLoader(modRoot: File, staging: File, hint: String, modsRoot: File, log: (String) -> Unit): Mod {
+        val manifest = File(modRoot, "mods-unpacked").listFiles()
+            ?.filter { it.isDirectory }
+            ?.map { File(it, "manifest.json") }
+            ?.firstOrNull { it.isFile }
+        var name = if (modRoot == staging) hint else modRoot.name
+        var author = ""
+        var version = ""
+        var description = ""
+        if (manifest != null) {
+            try {
+                val j = JSONObject(manifest.readText())
+                name = j.optString("name", name).ifBlank { name }
+                author = j.optString("namespace", "")
+                version = j.optString("version_number", "")
+                description = j.optString("description", "")
+            } catch (e: Exception) {
+                log("Could not read manifest.json")
+            }
+        }
+        val folder = uniqueFolder(modsRoot, sanitize((if (author.isNotBlank()) "$author-" else "") + name))
+        modRoot.copyRecursively(File(modsRoot, folder), overwrite = true)
+        log("Mod folder: $folder")
+        log("Godot Mod Loader mod (experimental)")
+        return Mod(
+            id = folder,
+            name = name,
+            version = version,
+            author = author,
+            description = description,
+            folder = folder,
+            enabled = true,
+            kind = ModKinds.LOADER
+        )
+    }
+
+    private fun importPack(staging: File, hint: String, modsRoot: File, log: (String) -> Unit, raw: File?): Mod {
+        val base = hint.ifBlank { "pack" }
+        val folder = uniqueFolder(modsRoot, sanitize(base))
+        val dst = File(modsRoot, folder)
+        val nested = staging.walkTopDown().any { it.isFile && it.extension.lowercase() in packExt }
+        if (nested) {
+            staging.copyRecursively(dst, overwrite = true)
+        } else if (raw != null && raw.length() > 0 && (isPck(raw) || staging.walkTopDown().any { it.isFile })) {
+            dst.mkdirs()
+            raw.copyTo(File(dst, if (isPck(raw)) "$folder.pck" else "$folder.zip"), overwrite = true)
+        } else {
+            throw IOException("No mod found. Supported: GUMM mods (mod.cfg and mod.gd) and resource packs (.pck or .zip).")
+        }
+        log("Resource pack: $folder")
+        return Mod(
+            id = folder,
+            name = base,
+            version = "",
+            author = "",
+            description = "Resource pack",
+            folder = folder,
+            enabled = true,
+            kind = ModKinds.PACK
+        )
+    }
+
+    private fun findRoots(dir: File, match: (File) -> Boolean): List<File> {
         val found = ArrayList<File>()
         val queue = ArrayDeque<File>()
         queue.add(dir)
         while (queue.isNotEmpty()) {
             val d = queue.removeFirst()
-            if (File(d, "mod.cfg").isFile) {
+            if (match(d)) {
                 found.add(d)
                 continue
             }

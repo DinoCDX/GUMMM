@@ -48,12 +48,22 @@ object Installer {
         if (Build.VERSION.SDK_INT >= 31) {
             params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
         }
+        val splits = File(apk.parentFile, "splits").listFiles()
+            ?.filter { it.isFile && it.extension.equals("apk", true) }?.sortedBy { it.name } ?: emptyList()
         val id = installer.createSession(params)
         installer.openSession(id).use { session ->
             apk.inputStream().use { input ->
                 session.openWrite("base.apk", 0, apk.length()).use { out ->
                     input.copyTo(out, 1 shl 16)
                     session.fsync(out)
+                }
+            }
+            for ((n, s) in splits.withIndex()) {
+                s.inputStream().use { input ->
+                    session.openWrite("split_$n.apk", 0, s.length()).use { out ->
+                        input.copyTo(out, 1 shl 16)
+                        session.fsync(out)
+                    }
                 }
             }
             val intent = Intent(ctx, InstallReceiver::class.java).setAction(ACTION)

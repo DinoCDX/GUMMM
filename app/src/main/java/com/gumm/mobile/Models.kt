@@ -10,7 +10,9 @@ data class Mod(
     val author: String,
     val description: String,
     val folder: String,
-    val enabled: Boolean
+    val enabled: Boolean,
+    val kind: String = "gumm",
+    val kindManual: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -20,6 +22,8 @@ data class Mod(
         .put("description", description)
         .put("folder", folder)
         .put("enabled", enabled)
+        .put("kind", kind)
+        .put("kindManual", kindManual)
 
     companion object {
         fun fromJson(o: JSONObject) = Mod(
@@ -29,7 +33,9 @@ data class Mod(
             author = o.optString("author"),
             description = o.optString("description"),
             folder = o.getString("folder"),
-            enabled = o.optBoolean("enabled", true)
+            enabled = o.optBoolean("enabled", true),
+            kind = o.optString("kind", "gumm").ifBlank { "gumm" },
+            kindManual = o.optBoolean("kindManual", false)
         )
     }
 }

@@ -30,7 +30,7 @@ object AppPrefs {
         set(v) = put("d_saves", v)
 
     var modsExternal: Boolean
-        get() = flag("d_external", false)
+        get() = flag("d_external", true)
         set(v) = put("d_external", v)
 
     var overlay: Boolean

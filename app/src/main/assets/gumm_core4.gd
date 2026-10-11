@@ -12,6 +12,7 @@ var config_path = ""
 var log_path = ""
 var rev = ""
 var defaults = {}
+var kinds = {}
 var show_button = true
 var tree = null
 
@@ -42,6 +43,8 @@ func setup(cfg):
 	log_path = cfg["log"]
 	rev = cfg["rev"]
 	defaults = cfg["defaults"]
+	if cfg.has("kinds"):
+		kinds = cfg["kinds"]
 	show_button = cfg["button"]
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	name = "GUMMCore"
@@ -163,13 +166,81 @@ func make_entry(dir):
 		want = bool(defaults[folder])
 	if states.has(folder):
 		want = bool(states[folder])
-	return {"dir": dir, "folder": folder, "title": title, "want": want, "inst": null, "active": false, "btn": null, "error": ""}
+	var kind = kind_of(dir, folder)
+	if kind == "pack":
+		title += " [pack]"
+	elif kind == "modloader":
+		title += " [mod loader]"
+	return {"dir": dir, "folder": folder, "title": title, "want": want, "inst": null, "active": false, "btn": null, "error": "", "kind": kind, "packed": false}
+
+
+func is_pack(n):
+	var ext = n.get_extension().to_lower()
+	return ext == "pck" or ext == "zip"
+
+
+func pack_files(dir):
+	var found = []
+	for n in list_entries(dir, 0):
+		if is_pack(n):
+			found.append(dir + "/" + n)
+	for sub in list_entries(dir, 1):
+		for n in list_entries(dir + "/" + sub, 0):
+			if is_pack(n):
+				found.append(dir + "/" + sub + "/" + n)
+	return found
+
+
+func kind_of(dir, folder):
+	if kinds.has(folder):
+		return str(kinds[folder])
+	var files = list_entries(dir, 2)
+	if files.has("mod.gd") or files.has("GUMM_mod.gd"):
+		return "gumm"
+	if files.has("mods-unpacked"):
+		return "modloader"
+	if pack_files(dir).size() > 0:
+		return "pack"
+	return "gumm"
 
 
 func fail(e, msg):
 	e["error"] = msg
 	log_line(msg)
 	flush()
+
+
+func load_pack(path, folder):
+	var target = path
+	if path.begins_with("res://"):
+		target = copy_pack(path, folder)
+		if target == "":
+			return false
+	var ok = ProjectSettings.load_resource_pack(target)
+	if ok:
+		log_line("Pack loaded: " + path)
+	else:
+		log_line("Pack failed: " + path)
+	return ok
+
+
+func copy_pack(path, folder):
+	DirAccess.make_dir_recursive_absolute("user://gumm_packs")
+	var dest = "user://gumm_packs/" + folder + "_" + path.get_file()
+	var src = FileAccess.open(path, FileAccess.READ)
+	if src == null:
+		log_line("Cannot read " + path)
+		return ""
+	var out = FileAccess.open(dest, FileAccess.WRITE)
+	if out == null:
+		log_line("Cannot write " + dest)
+		return ""
+	var size = src.get_length()
+	while src.get_position() < size:
+		out.store_buffer(src.get_buffer(min(1048576, size - src.get_position())))
+	out.close()
+	src.close()
+	return ProjectSettings.globalize_path(dest)
 
 
 func load_script(path):
@@ -202,7 +273,35 @@ func assign_paths(inst, dir):
 					inst.set(pname, dir)
 
 
+func activate_pack(e):
+	if e["packed"]:
+		e["active"] = true
+		return true
+	var packs = pack_files(e["dir"])
+	if packs.size() == 0:
+		fail(e, "No .pck or .zip in " + e["dir"] + " (found: " + describe_dir(e["dir"]) + ")")
+		return false
+	var ok = true
+	for p in packs:
+		if not load_pack(p, e["folder"]):
+			ok = false
+	if not ok:
+		fail(e, "Could not load every pack of " + e["title"])
+		return false
+	e["packed"] = true
+	e["error"] = ""
+	e["active"] = true
+	log_line("Loaded pack mod " + e["title"] + " (" + str(packs.size()) + " files)")
+	return true
+
+
 func activate(e):
+	if e["kind"] == "pack":
+		return activate_pack(e)
+	if e["kind"] == "modloader":
+		e["active"] = true
+		log_line("Godot Mod Loader mod " + e["title"] + " is loaded by the Godot Mod Loader")
+		return true
 	if e["inst"] == null:
 		var path = entry_script(e["dir"])
 		prime_base(e["dir"])
@@ -268,6 +367,7 @@ func read_config():
 	if text == "":
 		return
 	var loaded = {}
+	var loaded_kinds = {}
 	for line in text.split("\n"):
 		var t = line.strip_edges()
 		var i = t.find("=")
@@ -277,9 +377,12 @@ func read_config():
 		var v = t.substr(i + 1)
 		if k == "rev":
 			rev = v
+		elif k.begins_with("kind:"):
+			loaded_kinds[k.substr(5)] = v
 		else:
 			loaded[k] = (v == "1")
 	defaults = loaded
+	kinds = loaded_kinds
 
 
 func read_state():

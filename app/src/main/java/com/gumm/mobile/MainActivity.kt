@@ -11,13 +11,16 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -26,6 +29,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
+import java.util.zip.ZipFile
 import java.util.UUID
 
 class MainActivity : Activity() {
@@ -41,7 +45,7 @@ class MainActivity : Activity() {
 
     private var busy = false
     private var tab = 0
-    private val tabNames = arrayOf("Play", "Mods", "Settings", "Log")
+    private val tabNames = arrayOf("Play", "Mods", "Files", "Settings", "Log")
     private var currentGame: String? = null
     private var pendingGame: String? = null
     private var pendingApk: File? = null
@@ -67,6 +71,7 @@ class MainActivity : Activity() {
         const val REQ_EXPORT_KEY = 6
         const val REQ_IMPORT_KEY = 7
         const val REQ_UNINSTALL = 8
+        const val REQ_EDIT_FILE = 9
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -170,6 +175,7 @@ class MainActivity : Activity() {
             REQ_UPDATE_APK -> if (gid != null) updateFromApk(gid, uri)
             REQ_EXPORT_KEY -> exportKey(uri)
             REQ_IMPORT_KEY -> importKey(uri)
+            REQ_EDIT_FILE -> if (gid != null) replaceEdit(gid, uri)
         }
     }
 
@@ -283,6 +289,378 @@ class MainActivity : Activity() {
     }
 
     private var logMode = 0
+
+    private var fbGame = ""
+    private var fbSource = 0
+    private var fbDir = ""
+    private var fbQuery = ""
+    private var fbContent = false
+    private var fbSearching = false
+    private var fbLoading = false
+    private var fbHits: List<Hit>? = null
+    private var fbHitsBusy = false
+    private var fbShown = 300
+    private val fbCache = HashMap<String, List<FEntry>>()
+    private var editTarget: String? = null
+    private val fbNames = arrayOf("Original", "Modded", "Game pack")
+
+    private fun filesTab(root: LinearLayout, g: Game) {
+        if (fbGame != g.id) {
+            fbGame = g.id
+            fbSource = 0
+            fbDir = ""
+            fbQuery = ""
+            fbSearching = false
+            fbHits = null
+            fbCache.clear()
+        }
+        val sources = hbox(this)
+        for (i in fbNames.indices) {
+            sources.addView(
+                pill(this, fbNames[i], if (i == fbSource) Theme.accent else Theme.input) {
+                    fbSource = i
+                    fbDir = ""
+                    fbSearching = false
+                    fbHits = null
+                    fbShown = 300
+                    showGame(g.id)
+                },
+                lp(this, left = if (i == 0) 0 else 6, weight = 1f, width = 0)
+            )
+        }
+        root.addView(sources)
+        val note = when (fbSource) {
+            0 -> "Files of the game as you added it."
+            1 -> "Files of the last build, with the loader and mods added."
+            else -> "Files inside the game's .pck, as the game sees them in res://."
+        }
+        root.addView(tv(this, note, 12f, Theme.muted), lp(this, top = 6))
+        val key = g.id + ":" + fbSource
+        val entries = fbCache[key]
+        if (entries == null) {
+            root.addView(tv(this, "Reading files...", 14f, Theme.muted), lp(this, top = 16))
+            loadFileIndex(g, key)
+            return
+        }
+        if (entries.isEmpty()) {
+            val c = card(this)
+            val msg = when (fbSource) {
+                1 -> "Nothing built yet. Build the game first."
+                2 -> "No .pck found. This game keeps its files directly in the APK, see Original."
+                else -> "No files found."
+            }
+            c.addView(tv(this, msg, 13f, Theme.muted))
+            root.addView(c, fullWidth(this, 12))
+            return
+        }
+        val edited = FileTools.editedPaths(FileTools.editsZip(store, g.id))
+        val searchBox = field(this, "Search file names", fbQuery) { fbQuery = it }
+        root.addView(searchBox, fullWidth(this, 12))
+        root.addView(toggleRow(this, "Search inside text files", "Slower, looks at scripts, scenes and configs", fbContent) { fbContent = it })
+        val actions = hbox(this)
+        actions.addView(primary(this, "Search", Theme.accent) { runFileSearch(g, entries) }, lp(this, weight = 1f, width = 0))
+        if (fbSearching) {
+            actions.addView(pill(this, "Clear", Theme.input) {
+                fbSearching = false
+                fbQuery = ""
+                fbHits = null
+                showGame(g.id)
+            }, lp(this, left = 8, weight = 1f, width = 0))
+        }
+        root.addView(actions, fullWidth(this, 8))
+
+        if (fbSearching && fbQuery.isNotBlank()) {
+            val q = fbQuery.lowercase()
+            val byName = entries.filter { it.path.lowercase().contains(q) }
+            root.addView(section(this, "Names matching (${byName.size})"))
+            byName.take(fbShown).forEach { root.addView(fileRow(g, it, edited)) }
+            if (fbContent) {
+                root.addView(section(this, "Text matches"))
+                val hits = fbHits
+                if (hits == null) {
+                    root.addView(tv(this, "Searching...", 13f, Theme.muted))
+                } else if (hits.isEmpty()) {
+                    root.addView(tv(this, "No matches", 13f, Theme.muted))
+                } else {
+                    for (h in hits) {
+                        val c = card(this)
+                        c.addView(tv(this, h.entry.path + ":" + h.line, 12f, Theme.accent))
+                        c.addView(tv(this, h.text, 12f, Theme.text).apply { typeface = Typeface.MONOSPACE })
+                        c.setOnClickListener { openFile(g, h.entry) }
+                        root.addView(c, fullWidth(this, 8))
+                    }
+                }
+            }
+            return
+        }
+
+        val folders = java.util.TreeMap<String, Int>()
+        val files = ArrayList<FEntry>()
+        for (e in entries) {
+            if (!e.path.startsWith(fbDir)) continue
+            val rest = e.path.substring(fbDir.length)
+            val i = rest.indexOf('/')
+            if (i < 0) files.add(e) else folders[rest.substring(0, i)] = (folders[rest.substring(0, i)] ?: 0) + 1
+        }
+        files.sortBy { it.path.lowercase() }
+        val head = card(this)
+        head.addView(tv(this, "/" + fbDir, 13f, Theme.text, true))
+        head.addView(tv(this, entries.size.toString() + " files in this view", 12f, Theme.muted))
+        root.addView(head, fullWidth(this, 12))
+        val bar = hbox(this)
+        if (fbDir.isNotEmpty()) {
+            bar.addView(pill(this, "Up", Theme.input) {
+                fbDir = fbDir.dropLast(1).substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
+                fbShown = 300
+                showGame(g.id)
+            }, lp(this, weight = 1f, width = 0))
+        }
+        bar.addView(pill(this, "Export this folder", Theme.input) {
+            val list = entries.filter { it.path.startsWith(fbDir) }
+            exportEntries(g, list, fbNames[fbSource])
+        }, lp(this, left = if (fbDir.isNotEmpty()) 8 else 0, weight = 1f, width = 0))
+        root.addView(bar, fullWidth(this, 8))
+        var shown = 0
+        for ((name, count) in folders) {
+            if (shown >= fbShown) break
+            shown++
+            val c = card(this)
+            c.addView(tv(this, name + "/", 15f, Theme.accent, true))
+            c.addView(tv(this, "$count files", 12f, Theme.muted))
+            c.setOnClickListener {
+                fbDir = fbDir + name + "/"
+                fbShown = 300
+                showGame(g.id)
+            }
+            root.addView(c, fullWidth(this, 8))
+        }
+        for (e in files) {
+            if (shown >= fbShown) break
+            shown++
+            root.addView(fileRow(g, e, edited))
+        }
+        if (folders.size + files.size > shown) {
+            root.addView(pill(this, "Show more", Theme.input) {
+                fbShown += 300
+                showGame(g.id)
+            }, fullWidth(this, 8))
+        }
+    }
+
+    private fun fileRow(g: Game, e: FEntry, edited: Set<String>): View {
+        val c = card(this)
+        val name = if (fbDir.isEmpty() || fbSearching) e.path else e.path.substring(fbDir.length)
+        val res = FileTools.resPath(e)
+        val mark = if (res != null && res in edited) "  (in My edits)" else ""
+        c.addView(tv(this, name + mark, 14f, Theme.text))
+        c.addView(tv(this, ModInfo.formatSize(e.size) + if (e.encrypted) " \u00b7 encrypted" else "", 12f, Theme.muted))
+        c.setOnClickListener { openFile(g, e) }
+        return c.also { it.layoutParams = fullWidth(this, 8) }
+    }
+
+    private fun loadFileIndex(g: Game, key: String) {
+        if (fbLoading) return
+        fbLoading = true
+        val id = g.id
+        val source = fbSource
+        Thread {
+            val list = try {
+                when (source) {
+                    0 -> FileTools.indexApks(FileTools.originalFiles(store, id))
+                    1 -> FileTools.indexApks(FileTools.moddedFiles(store, id))
+                    else -> FileTools.indexPcks(FileTools.originalFiles(store, id))
+                }.sortedBy { it.path.lowercase() }
+            } catch (e: Exception) {
+                emptyList()
+            }
+            runOnUiThread {
+                fbLoading = false
+                fbCache[key] = list
+                if (currentGame == id && tab == 2) showGame(id)
+            }
+        }.start()
+    }
+
+    private fun runFileSearch(g: Game, entries: List<FEntry>) {
+        if (fbQuery.isBlank()) {
+            toast("Type something to search")
+            return
+        }
+        fbSearching = true
+        fbShown = 300
+        fbHits = null
+        if (fbContent && !fbHitsBusy) {
+            fbHitsBusy = true
+            val q = fbQuery
+            val id = g.id
+            Thread {
+                val hits = FileTools.searchContent(entries, q, 200) { false }
+                runOnUiThread {
+                    fbHitsBusy = false
+                    fbHits = hits
+                    if (currentGame == id && tab == 2) showGame(id)
+                }
+            }.start()
+        }
+        showGame(g.id)
+    }
+
+    private fun openFile(g: Game, e: FEntry) {
+        Thread {
+            val data = try {
+                FileTools.Reader().use { it.read(e, 262144) }
+            } catch (ex: Exception) {
+                ByteArray(0)
+            }
+            runOnUiThread { showFileDialog(g, e, data) }
+        }.start()
+    }
+
+    private fun showFileDialog(g: Game, e: FEntry, data: ByteArray) {
+        val pad = dp(this, 16)
+        val box = vbox(this).apply { setPadding(pad, pad, pad, pad) }
+        box.addView(tv(this, e.path, 13f, Theme.accent, true))
+        val truncated = e.size > data.size && !e.encrypted
+        box.addView(tv(this, ModInfo.formatSize(e.size) + if (truncated) " \u00b7 showing the first 256 KB" else "", 12f, Theme.muted))
+        var editor: EditText? = null
+        val res = FileTools.resPath(e)
+        if (e.encrypted) {
+            box.addView(tv(this, "This file is encrypted and can't be read.", 13f, Theme.danger), lp(this, top = 10))
+        } else if (FileTools.isImage(e.path)) {
+            val bmp = BitmapFactory.decodeByteArray(data, 0, data.size)
+            if (bmp != null) {
+                val iv = ImageView(this)
+                iv.adjustViewBounds = true
+                iv.setImageBitmap(bmp)
+                box.addView(iv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(this@MainActivity, 10) })
+                box.addView(tv(this, bmp.width.toString() + " x " + bmp.height, 12f, Theme.muted))
+            } else {
+                box.addView(tv(this, FileTools.hexDump(data), 11f, Theme.text).apply { typeface = Typeface.MONOSPACE }, lp(this, top = 10))
+            }
+        } else if (FileTools.looksText(e.path, data)) {
+            val ed = EditText(this)
+            ed.setText(String(data, Charsets.UTF_8))
+            ed.typeface = Typeface.MONOSPACE
+            ed.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f)
+            ed.setTextColor(Theme.text)
+            ed.background = rounded(Theme.input, dp(this, 8).toFloat())
+            ed.setPadding(dp(this, 10), dp(this, 10), dp(this, 10), dp(this, 10))
+            ed.gravity = Gravity.TOP
+            ed.setHorizontallyScrolling(true)
+            box.addView(ed, fullWidth(this, 10))
+            editor = ed
+        } else {
+            box.addView(tv(this, FileTools.hexDump(data), 11f, Theme.text).apply { typeface = Typeface.MONOSPACE }, lp(this, top = 10))
+        }
+        val dialog = AlertDialog.Builder(this).setView(ScrollView(this).apply { addView(box) }).setNegativeButton("Close", null).create()
+        val row = hbox(this)
+        row.addView(pill(this, "Export", Theme.input) {
+            exportEntries(g, listOf(e), fbNames[fbSource])
+        }, lp(this, weight = 1f, width = 0))
+        if (res != null && fbSource != 1 && !e.encrypted) {
+            row.addView(pill(this, "Copy to My edits", Theme.input) {
+                dialog.dismiss()
+                copyToEdits(g.id, e, res)
+            }, lp(this, left = 8, weight = 1f, width = 0))
+        }
+        box.addView(row, fullWidth(this, 12))
+        if (res != null && fbSource != 1 && !e.encrypted) {
+            val ed = editor
+            if (ed != null && !truncated) {
+                box.addView(primary(this, "Save my changes to My edits", Theme.accent) {
+                    val bytes = ed.text.toString().toByteArray(Charsets.UTF_8)
+                    dialog.dismiss()
+                    saveEdit(g.id, res) { it.write(bytes) }
+                }, fullWidth(this, 8))
+            }
+            box.addView(pill(this, "Replace with a file from my phone", Theme.input) {
+                editTarget = res
+                dialog.dismiss()
+                pickDocument(REQ_EDIT_FILE, arrayOf("*/*"))
+            }, fullWidth(this, 8))
+            box.addView(tv(this, "Edits go into a resource pack called My edits. It loads last, so it wins over other mods.", 12f, Theme.muted), lp(this, top = 8))
+        } else if (fbSource != 1) {
+            box.addView(tv(this, "This file is not a game resource, so a mod can't replace it.", 12f, Theme.muted), lp(this, top = 8))
+        }
+        dialog.show()
+    }
+
+    private fun ensureEditsMod(id: String) {
+        val g = store.get(id) ?: return
+        if (g.mods.any { it.folder == FileTools.EDITS_FOLDER }) return
+        val mod = Mod(
+            id = FileTools.EDITS_FOLDER,
+            name = "My edits",
+            version = "",
+            author = "",
+            description = "Files edited or replaced in GUMMM",
+            folder = FileTools.EDITS_FOLDER,
+            enabled = true,
+            kind = ModKinds.PACK
+        )
+        store.update(id) { it.copy(mods = it.mods + mod) }
+    }
+
+    private fun saveEdit(id: String, res: String, writer: (java.io.OutputStream) -> Unit) {
+        try {
+            FileTools.putEdit(FileTools.editsZip(store, id), res, writer)
+            ensureEditsMod(id)
+            scheduleSync(id)
+            toast("Saved to My edits. Rebuild to apply.")
+            showGame(id)
+        } catch (ex: Exception) {
+            appendLog("! " + (ex.message ?: ex.javaClass.simpleName))
+        }
+    }
+
+    private fun copyToEdits(id: String, e: FEntry, res: String) {
+        task("Copying to My edits", done = {
+            scheduleSync(id)
+            showGame(id)
+        }) { log ->
+            FileTools.putEdit(FileTools.editsZip(store, id), res) { out ->
+                FileTools.Reader().use { it.copyTo(e, out) }
+            }
+            ensureEditsMod(id)
+            log("Copied $res to My edits")
+        }
+    }
+
+    private fun replaceEdit(id: String, uri: Uri) {
+        val res = editTarget ?: return
+        editTarget = null
+        try {
+            val input = contentResolver.openInputStream(uri) ?: throw IllegalStateException("Cannot open file")
+            saveEdit(id, res) { out -> input.use { it.copyTo(out, 1 shl 16) } }
+        } catch (ex: Exception) {
+            appendLog("! " + (ex.message ?: ex.javaClass.simpleName))
+        }
+    }
+
+    private fun exportEntries(g: Game, list: List<FEntry>, source: String) {
+        if (!ExternalMods.available()) {
+            toast("Allow All files access first")
+            awaitingAccess = true
+            ExternalMods.openSettings(this)
+            return
+        }
+        val root = FileTools.exportRoot(g.title, source)
+        task("Exporting ${list.size} files") { log ->
+            var n = 0
+            FileTools.Reader().use { r ->
+                for (e in list) {
+                    if (e.encrypted) continue
+                    val dest = File(root, e.path)
+                    val canonical = dest.canonicalPath
+                    if (!canonical.startsWith(root.canonicalPath + File.separator)) continue
+                    dest.parentFile?.mkdirs()
+                    dest.outputStream().buffered().use { out -> r.copyTo(e, out) }
+                    n++
+                }
+            }
+            log("Exported $n files to Download/GUMMM/" + FileTools.safe(g.title) + "/" + source)
+        }
+    }
 
     private fun logTab(root: LinearLayout, g: Game) {
         val names = arrayOf("Build log", "Loader log")
@@ -560,32 +938,87 @@ class MainActivity : Activity() {
 
     private fun pickInstalled() = task("Scanning installed apps") { _ ->
         val pm = packageManager
-        val apps = pm.getInstalledApplications(0)
+        val all = pm.getInstalledApplications(0)
             .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 && it.packageName != packageName }
-            .filter { GodotInspector.looksLikeGodot(File(it.sourceDir)) }
             .sortedBy { pm.getApplicationLabel(it).toString().lowercase() }
+        val apps = all.filter {
+            GodotInspector.looksLikeGodotAny(File(it.sourceDir), (it.splitSourceDirs ?: emptyArray()).map { s -> File(s) })
+        }
         runOnUiThread {
             if (apps.isEmpty()) {
-                toast("No Godot games found")
+                showAppChoice("No Godot games detected. All apps", all)
             } else {
-                val names = apps.map { pm.getApplicationLabel(it).toString() + "\n" + it.packageName }.toTypedArray()
+                val names = apps.map { pm.getApplicationLabel(it).toString() + "\n" + it.packageName }.toMutableList()
+                names.add("Not listed? Show all apps")
                 AlertDialog.Builder(this)
                     .setTitle("Installed Godot games")
-                    .setItems(names) { _, i -> addInstalled(apps[i]) }
+                    .setItems(names.toTypedArray()) { _, i ->
+                        if (i < apps.size) addInstalled(apps[i]) else showAppChoice("All apps", all)
+                    }
                     .show()
             }
         }
     }
 
+    private fun showAppChoice(title: String, apps: List<ApplicationInfo>) {
+        val pm = packageManager
+        val names = apps.map { pm.getApplicationLabel(it).toString() + "\n" + it.packageName }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(names) { _, i -> addInstalled(apps[i]) }
+            .show()
+    }
+
     private fun addInstalled(ai: ApplicationInfo) {
         val id = newId()
         task("Copying ${packageManager.getApplicationLabel(ai)}", done = { showLibrary() }) { log ->
-            if (!ai.splitSourceDirs.isNullOrEmpty()) {
-                throw IllegalStateException("Split APK installs are not supported yet")
-            }
             val dest = store.originalApk(id)
             File(ai.sourceDir).copyTo(dest, overwrite = true)
+            copySplits(id, ai, log)
             registerSafely(id, dest, log)
+        }
+    }
+
+    private fun copySplits(id: String, ai: ApplicationInfo, log: (String) -> Unit) {
+        val dir = store.splitsDir(id)
+        dir.deleteRecursively()
+        val list = ai.splitSourceDirs ?: return
+        if (list.isEmpty()) return
+        dir.mkdirs()
+        for (p in list) File(p).copyTo(File(dir, File(p).name), overwrite = true)
+        log("Copied ${list.size} split APKs")
+    }
+
+    private fun extractBundle(file: File, id: String, base: File, log: (String) -> Unit): Boolean {
+        return try {
+            ZipFile(file).use { z ->
+                if (z.getEntry("AndroidManifest.xml") != null) return@use false
+                val apks = z.entries().asSequence().filter { !it.isDirectory && it.name.endsWith(".apk", true) }.toList()
+                if (apks.isEmpty()) return@use false
+                fun leaf(n: String) = n.substringAfterLast('/')
+                fun isSplit(n: String): Boolean {
+                    val l = leaf(n).lowercase()
+                    return l.startsWith("config.") || l.startsWith("split_") || l.contains("split_config")
+                }
+                val baseEntry = apks.firstOrNull { leaf(it.name).equals("base.apk", true) }
+                    ?: apks.filter { !isSplit(it.name) }.maxByOrNull { it.size }
+                    ?: apks.maxByOrNull { it.size }
+                if (baseEntry == null) return@use false
+                z.getInputStream(baseEntry).use { i -> base.outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+                val dir = store.splitsDir(id)
+                dir.deleteRecursively()
+                dir.mkdirs()
+                var n = 0
+                for (e in apks) {
+                    if (e.name == baseEntry.name) continue
+                    z.getInputStream(e).use { i -> File(dir, leaf(e.name)).outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+                    n++
+                }
+                log("Bundle: base APK plus $n split APKs")
+                true
+            }
+        } catch (e: java.util.zip.ZipException) {
+            false
         }
     }
 
@@ -593,8 +1026,14 @@ class MainActivity : Activity() {
         val id = newId()
         task("Reading APK", done = { showLibrary() }) { log ->
             val dest = store.originalApk(id)
-            val input = contentResolver.openInputStream(uri) ?: throw IllegalStateException("Cannot open file")
-            input.use { i -> dest.outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+            val tmp = File(cacheDir, "pick_" + System.nanoTime())
+            try {
+                val input = contentResolver.openInputStream(uri) ?: throw IllegalStateException("Cannot open file")
+                input.use { i -> tmp.outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+                if (!extractBundle(tmp, id, dest, log)) tmp.copyTo(dest, overwrite = true)
+            } finally {
+                tmp.delete()
+            }
             registerSafely(id, dest, log)
         }
     }
@@ -616,9 +1055,13 @@ class MainActivity : Activity() {
         ai.publicSourceDir = apk.path
         val title = ai.loadLabel(pm).toString()
         saveIcon(ai.loadIcon(pm), store.iconFile(id))
-        val gi = GodotInspector.inspect(apk)
-        if (!gi.isGodot) log("Warning: libgodot_android.so not found, this may not be a Godot game")
-        val scene = GodotInspector.detectMainScene(apk) ?: ""
+        val gi = GodotInspector.inspectAll(apk, store.splitFiles(id))
+        if (!gi.isGodot) {
+            log("Warning: Godot engine library not found, this may not be a Godot game")
+            log(GodotInspector.describe(apk))
+            for (sp in store.splitFiles(id)) log(GodotInspector.describe(sp))
+        }
+        val scene = GodotInspector.detectMainSceneAll(apk, store.splitFiles(id)) ?: ""
         if (store.defaultKit.isDirectory) {
             store.defaultKit.copyRecursively(store.kitDir(id), overwrite = true)
         }
@@ -669,10 +1112,11 @@ class MainActivity : Activity() {
         when (tab) {
             0 -> playTab(root, g)
             1 -> modsTab(root, g)
-            2 -> settingsTab(root, g)
+            2 -> filesTab(root, g)
+            3 -> settingsTab(root, g)
             else -> logTab(root, g)
         }
-        screen(root, "$id:$tab")
+        screen(root, "$id:$tab" + (if (tab == 2) ":$fbSource:$fbDir:$fbSearching" else ""))
     }
 
     private fun buildTabs(g: Game) {
@@ -782,13 +1226,13 @@ class MainActivity : Activity() {
             root.addView(c)
         }
         val actions = hbox(this)
-        actions.addView(primary(this, "Import zip", Theme.accent) { pickDocument(REQ_MOD_ZIP, zipTypes) }, lp(this, weight = 1f, width = 0))
+        actions.addView(primary(this, "Import file", Theme.accent) { pickDocument(REQ_MOD_ZIP, zipTypes) }, lp(this, weight = 1f, width = 0))
         actions.addView(primary(this, "Import folder", Theme.input) { pickTree(REQ_MOD_DIR) }, lp(this, left = 8, weight = 1f, width = 0))
         root.addView(actions, fullWidth(this, 12))
         if (g.mods.isEmpty()) {
             val c = card(this)
             c.addView(tv(this, "No mods yet", 16f, Theme.text, true))
-            c.addView(tv(this, "Import a mod zip or folder. It needs a mod.cfg and mod.gd.", 13f, Theme.muted), lp(this, top = 4))
+            c.addView(tv(this, "Import a mod zip, .pck or folder. Supported: GUMM mods (mod.cfg and mod.gd) and resource packs. Godot Mod Loader mods are experimental: Godot 4 games, or Godot 3 games that already include the loader (like Brotato).", 13f, Theme.muted), lp(this, top = 4))
             root.addView(c)
         }
         val conflicts = ModConflicts.scan(store, g)
@@ -824,6 +1268,39 @@ class MainActivity : Activity() {
         }
         c.addView(tv(this, "The upper mod wins. Use the arrows to change the order.", 12f, Theme.muted), lp(this, top = 8))
         return c
+    }
+
+    private fun chooseKind(id: String, m: Mod) {
+        val labels = arrayOf(
+            "Auto-detect",
+            "GUMM (mod.cfg and mod.gd)",
+            "Resource pack (.pck or .zip)",
+            "Godot Mod Loader (experimental)"
+        )
+        val current = if (!m.kindManual) 0 else when (m.kind) {
+            ModKinds.GUMM -> 1
+            ModKinds.PACK -> 2
+            else -> 3
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Mod type")
+            .setSingleChoiceItems(labels, current) { d, which ->
+                d.dismiss()
+                val dir = File(store.modsDir(id), m.folder)
+                val kind = when (which) {
+                    1 -> ModKinds.GUMM
+                    2 -> ModKinds.PACK
+                    3 -> ModKinds.LOADER
+                    else -> ModKinds.detect(dir)
+                }
+                store.update(id) { game ->
+                    game.copy(mods = game.mods.map { if (it.id == m.id) it.copy(kind = kind, kindManual = which != 0) else it })
+                }
+                scheduleSync(id)
+                showGame(id)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun moveMod(id: String, m: Mod, delta: Int) {
@@ -881,10 +1358,15 @@ class MainActivity : Activity() {
         val stateText = when (state) {
             ModState.ACTIVE -> "Active"
             ModState.CONFLICT -> "Conflicts with another mod"
-            ModState.ERROR -> "Error: mod.gd missing or failed to load"
+            ModState.ERROR -> "Error: " + (ModStatus.problem(dir, m, g) ?: "failed to load, see Log")
             ModState.OFF -> "Not active"
         }
         col.addView(tv(this, stateText, 12f, if (state == ModState.OFF) Theme.muted else bandColor, true))
+        val kindText = ModKinds.label(m.kind) + (if (m.kindManual) " (set by you)" else "") + " \u25BE"
+        val kindView = tv(this, kindText, 12f, Theme.accent)
+        kindView.setPadding(0, dp(this, 6), dp(this, 12), dp(this, 2))
+        kindView.setOnClickListener { chooseKind(g.id, m) }
+        col.addView(kindView)
         row.addView(col, lp(this, weight = 1f, width = 0))
         val sw = styleSwitch(Switch(this))
         sw.isChecked = m.enabled
@@ -1042,8 +1524,8 @@ class MainActivity : Activity() {
 
     private fun detect(id: String) = task("Inspecting APK", done = { showGame(id) }) { log ->
         val apk = store.originalApk(id)
-        val info = GodotInspector.inspect(apk)
-        val scene = GodotInspector.detectMainScene(apk)
+        val info = GodotInspector.inspectAll(apk, store.splitFiles(id))
+        val scene = GodotInspector.detectMainSceneAll(apk, store.splitFiles(id))
         store.update(id) {
             it.copy(
                 godotVersion = if (info.version.isNotEmpty()) info.version else it.godotVersion,
@@ -1071,8 +1553,9 @@ class MainActivity : Activity() {
             tmp.copyTo(store.originalApk(id), overwrite = true)
             tmp.delete()
             val apk = store.originalApk(id)
-            val gi = GodotInspector.inspect(apk)
-            val scene = GodotInspector.detectMainScene(apk)
+            if (GodotInspector.looksLikeGodot(apk)) store.splitsDir(id).deleteRecursively()
+            val gi = GodotInspector.inspectAll(apk, store.splitFiles(id))
+            val scene = GodotInspector.detectMainSceneAll(apk, store.splitFiles(id))
             store.update(id) {
                 it.copy(
                     godotVersion = gi.version.ifEmpty { it.godotVersion },
@@ -1092,11 +1575,11 @@ class MainActivity : Activity() {
         }) { log ->
             val g = store.get(id) ?: throw IllegalStateException("Game missing")
             val ai = packageManager.getApplicationInfo(g.originalPackage, 0)
-            if (!ai.splitSourceDirs.isNullOrEmpty()) throw IllegalStateException("Split APK installs are not supported yet")
             File(ai.sourceDir).copyTo(store.originalApk(id), overwrite = true)
+            copySplits(id, ai, log)
             val apk = store.originalApk(id)
-            val gi = GodotInspector.inspect(apk)
-            val scene = GodotInspector.detectMainScene(apk)
+            val gi = GodotInspector.inspectAll(apk, store.splitFiles(id))
+            val scene = GodotInspector.detectMainSceneAll(apk, store.splitFiles(id))
             store.update(id) {
                 it.copy(
                     godotVersion = gi.version.ifEmpty { it.godotVersion },

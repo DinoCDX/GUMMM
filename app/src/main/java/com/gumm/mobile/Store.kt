@@ -11,6 +11,9 @@ class Store(context: Context) {
 
     fun gameDir(id: String): File = File(root, "games/$id").apply { mkdirs() }
     fun originalApk(id: String): File = File(gameDir(id), "original.apk")
+    fun splitsDir(id: String): File = File(gameDir(id), "splits")
+    fun splitFiles(id: String): List<File> =
+        splitsDir(id).listFiles()?.filter { it.isFile && it.extension.equals("apk", true) }?.sortedBy { it.name } ?: emptyList()
     fun modsDir(id: String): File = File(gameDir(id), "mods").apply { mkdirs() }
     fun kitDir(id: String): File = File(gameDir(id), "kit").apply { mkdirs() }
     fun buildDir(id: String): File = File(gameDir(id), "build").apply { mkdirs() }
@@ -47,17 +50,25 @@ class Store(context: Context) {
         sb.append(LoaderGen.VERSION).append('|')
         val apk = originalApk(g.id)
         sb.append(apk.length()).append(':').append(apk.lastModified()).append('|')
+        for (s in splitFiles(g.id)) sb.append(s.name).append(s.length()).append(s.lastModified()).append('|')
         if (g.customLoader) {
             kitDir(g.id).walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach {
                 sb.append(it.name).append(it.length()).append(it.lastModified())
             }
         }
         sb.append(g.overlay).append('|')
+        for (m in g.mods.filter { it.enabled && it.kind == ModKinds.LOADER }) {
+            sb.append("|ml:").append(m.folder)
+            File(modsDir(g.id), m.folder).walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach {
+                sb.append(it.name).append(it.length()).append(it.lastModified())
+            }
+        }
         if (!g.modsExternal) {
             val packed = if (g.customLoader) g.mods.filter { it.enabled } else g.mods
             for (m in packed) {
                 sb.append('|').append(m.folder)
                 if (!g.customLoader) sb.append(m.enabled)
+                sb.append(m.kind).append(m.kindManual)
                 File(modsDir(g.id), m.folder).walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach {
                     sb.append(it.name).append(it.length()).append(it.lastModified())
                 }
