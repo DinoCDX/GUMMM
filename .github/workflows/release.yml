@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+
+      - name: Version from tag
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "CODE=$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: gradle :app:assembleRelease -PappVersion="$VERSION" -PappVersionCode="$CODE"
+
+      - name: Sign
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign --ks release.jks --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+            --out "GUMMM-${GITHUB_REF_NAME}.apk" aligned.apk
+          rm release.jks
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: GUMMM-${{ github.ref_name }}.apk
+          generate_release_notes: true

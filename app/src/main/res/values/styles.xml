@@ -1,0 +1,4 @@
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
+    <style name="AppThemeLight" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+</resources>

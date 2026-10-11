@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GUMMM - GUMM for Android</title>
+<meta name="description" content="GUMMM is a mobile port of GUMM. Add mods to Godot games on Android, reorder them, build and install.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root{--bg:#0f1115;--card:#1a1d24;--text:#e8eaf0;--muted:#9aa1b0;--accent:#5b8def;--line:#2a2e38;--green:#4caf7a;--yellow:#e8a33d;--red:#e5584f;--grey:#3a3f4b}
+@media (prefers-color-scheme:light){:root{--bg:#f3f4f8;--card:#fff;--text:#1b1e25;--muted:#5f6675;--accent:#3f6fd8;--line:#dadde5;--grey:#c3c8d3}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:24px 18px 64px}
+header{padding:48px 0 24px}
+.logo{border-radius:22px;display:block;margin-bottom:16px}
+.shots{display:flex;gap:10px;overflow-x:auto;padding-bottom:8px}
+.shots img{height:420px;width:auto;border-radius:14px;border:1px solid var(--line);flex:none}
+pre{background:var(--card);padding:12px 14px;border-radius:12px;overflow-x:auto;font-size:.85rem;line-height:1.45}
+h3{font-size:1rem;margin:20px 0 8px}
+h1{font-size:2.6rem;margin:0 0 8px;letter-spacing:.02em}
+h2{font-size:1.25rem;margin:40px 0 12px;color:var(--accent);text-transform:uppercase;letter-spacing:.08em}
+p{margin:0 0 12px}
+.muted{color:var(--muted)}
+.btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+a.btn{display:inline-block;padding:12px 20px;border-radius:12px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700}
+a.btn.alt{background:var(--card);color:var(--text);border:1px solid var(--line)}
+.card{background:var(--card);border-radius:14px;padding:14px 16px;margin:10px 0}
+.mod{display:flex;padding:0;overflow:hidden}
+.mod .band{width:6px;flex:none}
+.mod .in{padding:12px 16px}
+.mod b{display:block}
+ul{padding-left:20px;margin:0}
+li{margin:6px 0}
+code{background:var(--card);padding:2px 6px;border-radius:6px;font-size:.9em}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+<header>
+<img class="logo" src="icon.svg" alt="GUMMM icon" width="96" height="96">
+<h1>GUMMM</h1>
+<p class="muted">A mobile port of GUMM. Add mods to Godot games on Android, no PC needed.</p>
+<div class="btns">
+<a class="btn" href="https://github.com/DinoCDX/GUMMM/releases/latest">Download APK</a>
+<a class="btn alt" href="https://github.com/DinoCDX/GUMMM">Source on GitHub</a>
+</div>
+</header>
+
+<h2>Screenshots</h2>
+<div class="shots">
+<img src="screenshots/library.png" alt="Game library" onerror="this.remove()">
+<img src="screenshots/mods.png" alt="Mods tab with status bands" onerror="this.remove()">
+<img src="screenshots/play.png" alt="Play tab" onerror="this.remove()">
+<img src="screenshots/ingame.png" alt="In-game mod button" onerror="this.remove()">
+</div>
+
+<h2>What it does</h2>
+<ul>
+<li>Pick an installed Godot 3 or 4 game, or an APK file.</li>
+<li>Import mod zips or folders (a mod needs <code>mod.cfg</code> and <code>mod.gd</code>).</li>
+<li>Switch mods on and off, reorder them, see conflicts.</li>
+<li>Builds a patched APK, signs it and installs it next to the original game.</li>
+<li>Optional in-game button to switch mods while playing.</li>
+<li>Checks GitHub for new releases and updates itself.</li>
+</ul>
+
+<h2>Mod status</h2>
+<div class="card mod"><div class="band" style="background:var(--green)"></div><div class="in"><b>Active</b><span class="muted">Enabled and ready to load</span></div></div>
+<div class="card mod"><div class="band" style="background:var(--yellow)"></div><div class="in"><b>Conflict</b><span class="muted">Replaces the same file as another mod</span></div></div>
+<div class="card mod"><div class="band" style="background:var(--red)"></div><div class="in"><b>Error</b><span class="muted">Missing script or failed to load</span></div></div>
+<div class="card mod"><div class="band" style="background:var(--grey)"></div><div class="in"><b>Not active</b><span class="muted">Switched off</span></div></div>
+<p class="muted">Mods load from bottom to top, so the mod at the top wins a conflict.</p>
+
+<h2>Install</h2>
+<ul>
+<li>Download the APK from the <a href="https://github.com/DinoCDX/GUMMM/releases/latest">latest release</a>.</li>
+<li>Allow installs from your browser or file manager when Android asks.</li>
+<li>Open GUMMM, tap add, and choose your game.</li>
+<li>Import mods in the Mods tab, then build and install.</li>
+</ul>
+
+<h2>Making a mod</h2>
+<p>A mod is a folder or zip with a <code>mod.cfg</code> and a <code>mod.gd</code>. A zip with several mods imports them all.</p>
+<h3>mod.cfg</h3>
+<pre>name = "My Mod"
+version = "1.0"
+author = "You"
+description = "What it changes"</pre>
+<h3>mod.gd</h3>
+<pre>extends Node
+
+func initialize(mod_path, scene_tree):
+    print("loaded from ", mod_path)</pre>
+<p>The loader calls <code>initialize(mod_path, scene_tree)</code>, or <code>_initialize(scene_tree)</code> if that is what the mod has. An optional <code>icon.png</code> is shown next to the mod. Add <code>set_enabled(bool)</code> to let the in-game button switch the mod live.</p>
+
+<h2>Updates</h2>
+<p>GUMMM checks the latest GitHub release on start. If a newer version exists it offers to download and install it. You can switch this off or check by hand in App settings, About.</p>
+
+<h2>Changelog</h2>
+<div class="card"><b>Next</b>
+<ul>
+<li>Repository added to About</li>
+<li>Auto updater from GitHub releases</li>
+<li>Colored status band on each mod</li>
+<li>Mods load from bottom to top, the top mod wins</li>
+<li>App icon and this page</li>
+</ul></div>
+<p class="muted">Full history on the <a href="https://github.com/DinoCDX/GUMMM/releases">releases page</a>.</p>
+
+<h2>First build</h2>
+<p>With external mods, Android asks for <b>All files access</b> twice, once for GUMMM and once for the modded game. GUMMM explains this and takes you to the right settings page. You only do it once.</p>
+
+<h2>Notes</h2>
+<ul>
+<li>Android 9 or newer.</li>
+<li>Mods load from an external folder by default on Android 11 or newer, which needs All files access. Packed mode is available in settings.</li>
+<li>Copying save data needs root.</li>
+<li>Split APK games are not supported yet.</li>
+</ul>
+
+<footer>Made by <a href="https://github.com/DinoCDX">DinoCDX</a></footer>
+</main>
+</body>
+</html>
